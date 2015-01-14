@@ -1,4 +1,4 @@
-//! A cell with the ability to mutate the value through an immutable reference when safe
+//! A cell with the ability to mutate the value through an immutable reference when safe.
 //!
 //! # Comparison with `RefCell`
 //!
@@ -27,7 +27,7 @@
 //!
 //! ```rust
 //! # use mucell::MuCell;
-//! let mut cell = MuCell::new(vec![1i, 2, 3]);
+//! let mut cell = MuCell::new(vec![1, 2, 3]);
 //!
 //! // You can borrow from the cell mutably at no cost.
 //! cell.borrow_mut().push(4);
@@ -35,12 +35,12 @@
 //! // You can borrow immutably, too, and it’s very cheap.
 //! // (Rust’s standard borrow checking prevents you from doing
 //! // this while there’s a mutable reference taken out.)
-//! assert_eq!(cell.borrow()[], [1, 2, 3, 4][]);
+//! assert_eq!(&*cell.borrow(), &[1, 2, 3, 4]);
 //!
 //! // So long as there are no active borrows,
 //! // try_mutate can be used to mutate the value.
 //! assert!(cell.try_mutate(|x| x.push(5)));
-//! assert_eq!(cell.borrow()[], [1, 2, 3, 4, 5][]);
+//! assert_eq!(&*cell.borrow(), &[1, 2, 3, 4, 5]);
 //!
 //! // But when there is an immutable borrow active,
 //! // try_mutate says no.
@@ -58,7 +58,7 @@
 //!
 //! // Once they’re all cleared, try_mutate is happy again.
 //! assert!(cell.try_mutate(|x| x.push(6)));
-//! assert_eq!(cell.borrow()[], [1, 2, 3, 4, 5, 6][]);
+//! assert_eq!(&*cell.borrow(), &[1, 2, 3, 4, 5, 6]);
 //! ```
 //!
 //! Look at the examples in the repository for some slightly more practical (though still
@@ -68,11 +68,11 @@
 
 #![unstable = "almost stable, but not the macro parts"]
 #![no_std]
-#![feature(unsafe_destructor, macro_rules, phase, default_type_params)]
+#![feature(unsafe_destructor)]
 #![warn(bad_style, unused, missing_docs)]
+#![allow(unstable)]
 
-#[phase(plugin, link)] extern crate core;
-extern crate serialize;
+#[macro_use] extern crate core;
 extern crate rand;
 extern crate collections;
 
@@ -81,19 +81,20 @@ extern crate collections;
 use core::cell::{Cell, UnsafeCell};
 use core::default::Default;
 use core::fmt;
-use core::kinds::marker;
-use serialize::{Encoder, Decoder, Encodable, Decodable};
+use core::marker;
 use rand::{Rand, Rng};
-use core::hash::{Hash, sip};
-use core::prelude::{Option, Clone, Result, PartialEq, Eq, PartialOrd, Ord, Ordering, Deref, Drop};
+use core::hash::{Hash, Hasher};
+use core::prelude::{Option, Clone, Result, PartialEq, Eq, PartialOrd, Ord, FnOnce};
+use core::cmp::Ordering;
+use core::ops::{Deref, Drop};
 
-const MUTATING: uint = -1;
+const MUTATING: usize = -1;
 
 /// A cell with the ability to mutate the value through an immutable reference when safe
 #[stable]
 pub struct MuCell<T> {
     value: UnsafeCell<T>,
-    borrows: Cell<uint>,
+    borrows: Cell<usize>,
     nocopy: marker::NoCopy,
     noshare: marker::NoSync,
 }
@@ -151,7 +152,7 @@ impl<T> MuCell<T> {
     /// (yep, it’s not quite preventing aliasing). So don’t do it.
     #[inline]
     #[stable]
-    pub fn try_mutate(&self, mutator: |&mut T|) -> bool {
+    pub fn try_mutate<F: FnOnce(&mut T)>(&self, mutator: F) -> bool {
         if self.borrows.get() == 0 {
             self.borrows.set(MUTATING);
             mutator(unsafe { &mut *self.value.get() });
@@ -178,44 +179,46 @@ impl<'a, T: 'a> Drop for Ref<'a, T> {
 }
 
 #[unstable = "trait is not stable"]
-impl<'a, T: 'a> Deref<T> for Ref<'a, T> {
+impl<'a, T: 'a> Deref for Ref<'a, T> {
+    type Target = T;
+
     fn deref(&self) -> &T {
         unsafe { &*self._parent.value.get() }
     }
 }
 
-#[unstable = "trait is not stable"]
+#[stable]
 impl<T: PartialEq> PartialEq for MuCell<T> {
     fn eq(&self, other: &MuCell<T>) -> bool {
         *self.borrow() == *other.borrow()
     }
 }
 
-#[unstable = "trait is not stable"]
+#[stable]
 impl<T: Eq> Eq for MuCell<T> { }
 
-#[unstable = "trait is not stable"]
+#[stable]
 impl<T: PartialOrd> PartialOrd for MuCell<T> {
     fn partial_cmp(&self, other: &MuCell<T>) -> Option<Ordering> {
         self.borrow().partial_cmp(&*other.borrow())
     }
 }
 
-#[unstable = "trait is not stable"]
+#[stable]
 impl<T: Ord> Ord for MuCell<T> {
     fn cmp(&self, other: &MuCell<T>) -> Ordering {
         self.borrow().cmp(&*other.borrow())
     }
 }
 
-#[unstable = "trait is not stable"]
+#[stable]
 impl<T: Default> Default for MuCell<T> {
     fn default() -> MuCell<T> {
         MuCell::new(Default::default())
     }
 }
 
-#[unstable = "trait is not stable"]
+#[stable]
 impl<T: Clone> Clone for MuCell<T> {
     fn clone(&self) -> MuCell<T> {
         MuCell::new(self.borrow().clone())
@@ -256,8 +259,8 @@ impl<T: Rand> Rand for MuCell<T> {
 }
 
 #[unstable = "trait is not stable"]
-impl<T: Hash<S>, S = sip::SipState> Hash<S> for MuCell<T> {
-    fn hash(&self, state: &mut S) {
+impl<H, T> Hash<H> for MuCell<T> where H: Hasher, T: Hash<H> {
+    fn hash(&self, state: &mut H) {
         self.borrow().hash(state)
     }
 }
@@ -272,8 +275,7 @@ impl<T: Hash<S>, S = sip::SipState> Hash<S> for MuCell<T> {
 /// Here’s an example of usage:
 ///
 /// ```rust
-/// #![feature(phase)]
-/// #[phase(plugin, link)] extern crate mucell;
+/// #[macro_use] extern crate mucell;
 /// use mucell::{MuCell, Ref};
 ///
 /// struct Foo {
@@ -282,8 +284,8 @@ impl<T: Hash<S>, S = sip::SipState> Hash<S> for MuCell<T> {
 ///
 /// mucell_ref_type! {
 ///     #[doc = "…"]
-///     struct BarRef<'a>(Foo)
-///     impl Deref<str>
+///     struct BarRef<'a>(Foo),
+///     impl Deref -> str,
 ///     data: &'a str = |x| x.bar.as_slice()
 /// }
 ///
@@ -305,7 +307,7 @@ impl<T: Hash<S>, S = sip::SipState> Hash<S> for MuCell<T> {
 /// }
 ///
 /// fn main() {
-///     demo(&MuCell::new(Foo { bar: "panic".into_string() }));
+///     demo(&MuCell::new(Foo { bar: format!("panic") }));
 /// }
 /// ```
 ///
@@ -315,8 +317,8 @@ impl<T: Hash<S>, S = sip::SipState> Hash<S> for MuCell<T> {
 macro_rules! mucell_ref_type {
     (
         $(#[$attr:meta])*  // suggestions: doc, stability markers
-        struct $ref_name:ident<'a>($ty:ty)
-        impl Deref<$deref:ty>
+        struct $ref_name:ident<'a>($ty:ty),
+        impl Deref -> $deref:ty,
         data: $data_ty:ty = |$data_ident:ident| $data_expr:expr
     ) => {
         /// An immutable reference to a `MuCell`. Dereference to get at the object.
@@ -350,7 +352,8 @@ macro_rules! mucell_ref_type {
         }
 
         #[unstable = "trait is not stable"]
-        impl<'a> Deref<$deref> for $ref_name<'a> {
+        impl<'a> ::std::ops::Deref for $ref_name<'a> {
+            type Target = $deref;
             fn deref<'b>(&'b self) -> &'b $deref {
                 &*self._data
             }
